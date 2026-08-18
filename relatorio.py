@@ -1,0 +1,607 @@
+import streamlit as st
+import requests
+import pandas as pd
+from datetime import date, timedelta
+import io
+from typing import Optional, List, Dict, Any
+
+# Importação opcional para geração de PDF
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="Gestão de Locações", page_icon="🏢", layout="wide")
+
+API_URL = "http://127.0.0.1:8000"
+
+# Ocultar elementos da interface do Streamlit na hora de imprimir
+st.markdown("""
+<style>
+@media print {
+    [data-testid="stSidebar"], .stButton, header, footer { display: none !important; }
+    .main .block-container { padding: 0 !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------------------
+# FUNÇÕES AUXILIARES
+# ------------------------------------------------------------------------------
+def gerar_pdf_relatorio(df_dados: pd.DataFrame) -> io.BytesIO:
+    """Gera um buffer de PDF com os dados do relatório financeiro."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    story = []
+    
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'TitleStyle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        textColor=colors.HexColor('#1E3A8A'),
+        spaceAfter=12
+    )
+    
+    story.append(Paragraph("<b>Relatório Gerencial de Contratos de Locação</b>", title_style))
+    story.append(Paragraph(f"Emitido em: {date.today().strftime('%d/%m/%Y')}", styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    cols = list(df_dados.columns)
+    data = [cols] + df_dados.astype(str).values.tolist()
+    
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1E3A8A')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 7),
+        ('BOTTOMPADDING', (0,0), (-1,0), 6),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F3F4F6')]),
+    ]))
+    
+    story.append(table)
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+@st.cache_data(ttl=300) 
+def buscar_dados_contratos(api_url: str) -> Optional[List[Dict[str, Any]]]:
+    """Busca os dados dos contratos na API com tratamento de erros."""
+    try:
+        res = requests.get(f"{api_url}/relatorio", timeout=10)
+        res.raise_for_status() 
+        return res.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erro de conexão com a API: {e}")
+        return None
+    except ValueError:
+        st.error("Erro ao decodificar a resposta da API (formato JSON inválido).")
+        return None
+
+def preparar_dataframe(dados: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Padroniza colunas e tipagem do DataFrame recebido da API."""
+    df = pd.DataFrame(dados)
+    
+    if df.empty:
+        return df
+
+    mapeamento_colunas = {
+        "id": "ID",
+        "id_imovel": "ID Imóvel",
+        "id_locador": "ID Locador",
+        "id_locatario": "ID Locatário",
+        "id_fiador": "ID Fiador",
+        "numero_sequencia": "Nº Sequência",
+        "descricao_imovel": "Descrição do Imóvel",
+        "locador": "Locador",
+        "locatario": "Locatário",
+        "data_inicio": "Data Início",
+        "prazo_meses": "Prazo (Meses)",
+        "data_final": "Data Final",
+        "valor_locacao": "Valor (R$)",
+        "multa": "Multa (R$)",
+        "valor_iptu": "IPTU (R$)",
+        "status_iptu": "Status IPTU",
+        "dias_restantes": "Dias Restantes",
+        "indice_reajuste": "Índice de Reajuste",
+        "dados_bancarios_locador": "Dados Bancários (Locador)"
+    }
+    
+    colunas_presentes = {k: v for k, v in mapeamento_colunas.items() if k in df.columns}
+    df = df.rename(columns=colunas_presentes)
+    
+    if "Valor (R$)" in df.columns:
+        df["Valor (R$)"] = pd.to_numeric(df["Valor (R$)"], errors='coerce').fillna(0.0)
+    if "Dias Restantes" in df.columns:
+        df["Dias Restantes"] = pd.to_numeric(df["Dias Restantes"], errors='coerce').fillna(0)
+
+    return df
+
+st.title("🏢 Sistema Gerencial de Locação de Imóveis")
+
+# Navegação por Abas Principais (Atualizado com a aba 6 de Mensagens)
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "👤 Pessoas", "🏠 Imóveis", "📄 Contratos", "📊 Relatório", "📧 Alertas", "💬 Mensagens"
+])
+
+# ------------------------------------------------------------------------------
+# ABA 1: PESSOAS
+# ------------------------------------------------------------------------------
+with tab1:
+    st.header("Cadastrar Pessoa (Locador, Locatário ou Fiador)")
+    with st.form("form_pessoas", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            tipo = st.selectbox("Tipo de Perfil*", ["Locador", "Locatário", "Fiador"])
+            nome = st.text_input("Nome Completo*")
+            cpf = st.text_input("CPF*")
+            rg = st.text_input("RG*")
+        with col2:
+            endereco = st.text_input("Endereço Completo*")
+            cep = st.text_input("CEP*")
+            cidade = st.text_input("Cidade*")
+            estado = st.selectbox("Estado (UF)*", ["SP", "MG", "RJ", "PR", "SC", "RS", "GO", "DF", "ES", "BA", "CE", "PE", "OUTRO"])
+
+        doc_pessoa = st.file_uploader("📂 Upload de Documentos Pessoais", type=["pdf", "png", "jpg", "jpeg"])
+        btn_salvar_pessoa = st.form_submit_button("💾 Salvar Cadastro de Pessoa")
+
+        if btn_salvar_pessoa:
+            if not (nome and cpf and rg and endereco and cep and cidade):
+                st.warning("Preencha todos os campos obrigatórios (*).")
+            else:
+                payload = {"tipo": tipo, "nome": nome, "cpf": cpf, "rg": rg, "endereco": endereco, "cep": cep, "cidade": cidade, "estado": estado}
+                try:
+                    res = requests.post(f"{API_URL}/pessoas", json=payload)
+                    if res.status_code in [200, 201]:
+                        st.success(f"{tipo} '{nome}' cadastrado(a) com sucesso!")
+                        if doc_pessoa:
+                            files = {"file": (doc_pessoa.name, doc_pessoa.getvalue(), doc_pessoa.type)}
+                            req_upload = requests.post(f"{API_URL}/upload-documento", files=files)
+                            if req_upload.status_code == 200:
+                                st.info(f"Arquivo anexado no servidor com sucesso!")
+                    else:
+                        st.error(f"Erro ao cadastrar: {res.text}")
+                except Exception as e:
+                    st.error(f"Erro de conexão com o backend. O Uvicorn está rodando? Erro: {e}")
+
+    st.divider()
+    try:
+        res_p = requests.get(f"{API_URL}/pessoas")
+        if res_p.status_code == 200 and res_p.json():
+            st.dataframe(pd.DataFrame(res_p.json()), use_container_width=True)
+    except:
+        pass
+
+# ------------------------------------------------------------------------------
+# ABA 2: IMÓVEIS
+# ------------------------------------------------------------------------------
+with tab2:
+    st.header("Cadastrar Imóvel")
+    with st.form("form_imoveis", clear_on_submit=True):
+        col_imv1, col_imv2 = st.columns(2)
+        with col_imv1:
+            endereco_imovel = st.text_input("Endereço do Imóvel*")
+            descricao_imovel = st.text_area("Descrição do Imóvel*")
+        with col_imv2:
+            valor_iptu_imovel = st.number_input("Valor Anual/Mensal do IPTU (R$)", min_value=0.0, step=50.0)
+            status_iptu_imovel = st.selectbox("Status do IPTU", ["Pago", "Não Pago", "Isento", "Pendente"])
+
+        doc_imovel = st.file_uploader("📂 Upload de Documentos do Imóvel", type=["pdf", "png", "jpg", "jpeg"])
+        btn_salvar_imovel = st.form_submit_button("💾 Salvar Cadastro de Imóvel")
+
+        if btn_salvar_imovel:
+            if not (endereco_imovel and descricao_imovel):
+                st.warning("Preencha o endereço e a descrição do imóvel.")
+            else:
+                payload = {"endereco": endereco_imovel, "descricao": descricao_imovel, "valor_iptu": valor_iptu_imovel, "status_iptu": status_iptu_imovel}
+                try:
+                    res = requests.post(f"{API_URL}/imoveis", json=payload)
+                    if res.status_code in [200, 201]:
+                        st.success("Imóvel cadastrado com sucesso!")
+                        if doc_imovel:
+                            files = {"file": (doc_imovel.name, doc_imovel.getvalue(), doc_imovel.type)}
+                            requests.post(f"{API_URL}/upload-documento", files=files)
+                            st.info("Documento anexado ao imóvel com sucesso!")
+                    else:
+                        st.error(f"Erro ao salvar imóvel: {res.text}")
+                except Exception as e:
+                    st.error(f"Erro de conexão: {e}")
+
+    st.divider()
+    try:
+        res_i = requests.get(f"{API_URL}/imoveis")
+        if res_i.status_code == 200 and res_i.json():
+            st.dataframe(pd.DataFrame(res_i.json()), use_container_width=True)
+    except:
+        pass
+
+# ------------------------------------------------------------------------------
+# ABA 3: CONTRATOS
+# ------------------------------------------------------------------------------
+with tab3:
+    st.header("📝 Preenchimento e Geração de Contrato")
+    try:
+        req_p = requests.get(f"{API_URL}/pessoas")
+        req_i = requests.get(f"{API_URL}/imoveis")
+        
+        if req_p.status_code == 200 and req_i.status_code == 200:
+            pessoas = req_p.json()
+            imoveis = req_i.json()
+            
+            locadores = [p for p in pessoas if p["tipo"] == "Locador"]
+            locatarios = [p for p in pessoas if p["tipo"] == "Locatário"]
+            fiadores = [p for p in pessoas if p["tipo"] == "Fiador"]
+
+            if not imoveis or not locadores or not locatarios:
+                st.warning("⚠️ Cadastre ao menos 1 Imóvel, 1 Locador e 1 Locatário nas abas anteriores para gerar um contrato.")
+            else:
+                with st.form("form_contrato", clear_on_submit=True):
+                    imovel_id = st.selectbox("Selecione o Imóvel*", [i["id"] for i in imoveis], format_func=lambda x: next(i["descricao"] for i in imoveis if i["id"] == x))
+                    locador_id = st.selectbox("Locador Responsável*", [p["id"] for p in locadores], format_func=lambda x: next(p["nome"] for p in locadores if p["id"] == x))
+                    locatario_id = st.selectbox("Locatário Principal*", [p["id"] for p in locatarios], format_func=lambda x: next(p["nome"] for p in locatarios if p["id"] == x))
+                    
+                    opcoes_fiador = [0] + [p["id"] for p in fiadores]
+                    fiador_id = st.selectbox("Fiador", opcoes_fiador, format_func=lambda x: "Sem Fiador" if x == 0 else next(p["nome"] for p in fiadores if p["id"] == x))
+                    
+                    col_dt1, col_dt2 = st.columns(2)
+                    with col_dt1:
+                        dt_ini = st.date_input("Data de Início*")
+                    with col_dt2:
+                        prazo = st.number_input("Prazo em Meses*", min_value=1, value=12)
+                    
+                    dt_fim = dt_ini + timedelta(days=prazo*30)
+                    st.info(f"Término Previsto do Contrato: **{dt_fim.strftime('%d/%m/%Y')}**")
+
+                    val_loc = st.number_input("Valor Mensal (R$)*", min_value=0.0, step=100.0)
+                    val_multa = st.number_input("Valor Multa Rescisória (R$)", min_value=0.0, step=100.0)
+                    
+                    submit_contrato = st.form_submit_button("💾 Salvar Contrato e Ativar")
+                    
+                    if submit_contrato:
+                        payload_contrato = {
+                            "id_imovel": imovel_id,
+                            "id_locador": locador_id,
+                            "id_locatario": locatario_id,
+                            "id_fiador": fiador_id if fiador_id != 0 else None,
+                            "data_inicio": dt_ini.isoformat(),
+                            "prazo_meses": prazo,
+                            "data_final": dt_fim.isoformat(),
+                            "valor_locacao": val_loc,
+                            "multa": val_multa
+                        }
+                        res_c = requests.post(f"{API_URL}/contratos", json=payload_contrato)
+                        if res_c.status_code in [200, 201]:
+                            st.success("Contrato consolidado e gerado com sucesso!")
+                        else:
+                            st.error(f"Erro do Servidor: {res_c.text}")
+    except Exception as e:
+        st.error(f"O Backend não está acessível no momento: {e}")
+
+# ------------------------------------------------------------------------------
+# ABA 4: RELATÓRIOS (COM OPÇÃO DE RELATÓRIO DE RENOVAÇÃO)
+# ------------------------------------------------------------------------------
+with tab4:
+    st.header("📊 Painel de Relatórios e Gestão")
+    
+    # Seleção entre o Relatório Financeiro/Gerencial e o Relatório de Renovação
+    tipo_relatorio = st.radio(
+        "Selecione o Relatório Desejado:", 
+        ["Relatório Financeiro e Gerencial", "Relatório de Renovação de Contratos"],
+        horizontal=True
+    )
+    
+    st.divider()
+
+    if tipo_relatorio == "Relatório Financeiro e Gerencial":
+        if st.button("🔄 Atualizar Dados da API", help="Busca os dados mais recentes do servidor."):
+            buscar_dados_contratos.clear()
+            st.rerun()
+
+        dados = buscar_dados_contratos(API_URL)
+        
+        if not dados:
+            st.info("Nenhum contrato retornado ou aguardando conexão.")
+        else:
+            df = preparar_dataframe(dados)
+
+            if df.empty:
+                st.warning("A API retornou uma lista vazia de contratos.")
+            else:
+                # --- FILTROS DINÂMICOS ---
+                with st.container():
+                    st.markdown("### 🔍 Filtros")
+                    f_col1, f_col2, f_col3 = st.columns(3)
+                    
+                    with f_col1:
+                        status_iptu_opts = ["Todos"] + list(df["Status IPTU"].dropna().unique()) if "Status IPTU" in df.columns else ["Todos"]
+                        filtro_iptu = st.selectbox("Status do IPTU:", status_iptu_opts)
+                    
+                    with f_col2:
+                        busca_pessoa = st.text_input("Filtrar por Locador/Locatário (Nome parcial):")
+
+                    with f_col3:
+                        st.markdown("<br>", unsafe_allow_html=True) 
+                        dias_criticos = st.checkbox("⚠️ Apenas contratos vencendo em até 60 dias")
+
+                df_filtrado = df.copy()
+                if filtro_iptu != "Todos" and "Status IPTU" in df_filtrado.columns:
+                    df_filtrado = df_filtrado[df_filtrado["Status IPTU"] == filtro_iptu]
+
+                if busca_pessoa:
+                    filtro_texto = busca_pessoa.lower()
+                    if "Locador" in df_filtrado.columns and "Locatário" in df_filtrado.columns:
+                        df_filtrado = df_filtrado[
+                            df_filtrado["Locador"].str.lower().str.contains(filtro_texto, na=False) |
+                            df_filtrado["Locatário"].str.lower().str.contains(filtro_texto, na=False)
+                        ]
+
+                if dias_criticos and "Dias Restantes" in df_filtrado.columns:
+                    df_filtrado = df_filtrado[df_filtrado["Dias Restantes"] <= 60]
+
+                st.divider()
+
+                # --- CARDS DE MÉTRICAS (KPIs) ---
+                st.markdown("### 📌 Indicadores Gerais")
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                
+                total_contratos = len(df_filtrado)
+                receita_total = df_filtrado["Valor (R$)"].sum() if total_contratos > 0 and "Valor (R$)" in df_filtrado.columns else 0.0
+                vencendo_60d = len(df_filtrado[df_filtrado["Dias Restantes"] <= 60]) if total_contratos > 0 and "Dias Restantes" in df_filtrado.columns else 0
+                iptu_pendente = len(df_filtrado[df_filtrado["Status IPTU"] == "Não Pago"]) if total_contratos > 0 and "Status IPTU" in df_filtrado.columns else 0
+
+                kpi1.metric("Total de Contratos Filtrados", total_contratos)
+                kpi2.metric("Faturamento Mensal (Filtro)", f"R$ {receita_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                kpi3.metric("A Vencer (≤ 60 dias)", vencendo_60d, delta_color="inverse")
+                kpi4.metric("IPTUs Pendentes", iptu_pendente, delta_color="inverse")
+
+                st.divider()
+
+                # --- TABELA CONSOLIDADA ---
+                st.markdown("### 📋 Tabela Consolidada")
+                st.dataframe(
+                    df_filtrado, 
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"),
+                        "IPTU (R$)": st.column_config.NumberColumn("IPTU (R$)", format="R$ %.2f"),
+                        "Índice de Reajuste": st.column_config.TextColumn("Índice", help="Índice aplicável para reajuste (ex: IPCA, IGPM)"),
+                        "Dados Bancários (Locador)": st.column_config.TextColumn("Dados Bancários (Locador)", width="medium")
+                    }
+                )
+
+                if not df_filtrado.empty and "Descrição do Imóvel" in df_filtrado.columns and "Valor (R$)" in df_filtrado.columns:
+                    st.markdown("### 📈 Faturamento por Imóvel")
+                    chart_data = df_filtrado.groupby("Descrição do Imóvel")["Valor (R$)"].sum()
+                    st.bar_chart(chart_data)
+
+                # --- EXPORTAÇÃO ---
+                st.divider()
+                st.markdown("### 🖨️ Exportação")
+
+                col_exp1, col_exp2, col_exp3 = st.columns(3)
+
+                with col_exp1:
+                    if REPORTLAB_AVAILABLE and not df_filtrado.empty:
+                        pdf_buffer = gerar_pdf_relatorio(df_filtrado)
+                        st.download_button(
+                            label="📄 Baixar Relatório (PDF)",
+                            data=pdf_buffer,
+                            file_name=f"relatorio_locacoes_{date.today().strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                    elif not REPORTLAB_AVAILABLE:
+                        st.info("⚠️ Instale 'reportlab' para ativar PDF.")
+
+                with col_exp2:
+                    if not df_filtrado.empty:
+                        excel_buffer = io.BytesIO()
+                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                            df_filtrado.to_excel(writer, index=False, sheet_name='Contratos')
+                        excel_buffer.seek(0)
+                        st.download_button(
+                            label="📊 Exportar Planilha (Excel)",
+                            data=excel_buffer,
+                            file_name=f"relatorio_locacoes_{date.today().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+
+                with col_exp3:
+                    st.components.v1.html(
+                        '''
+                        <div style="display: flex; justify-content: center;">
+                            <button onclick="window.print()" style="width: 100%; padding: 10px; font-size: 14px; font-weight: bold; cursor: pointer; background-color: #f0f2f6; color: #31333F; border: 1px solid #c4c4c4; border-radius: 8px; transition: 0.3s;">
+                                🖨️ Imprimir Tela
+                            </button>
+                        </div>
+                        ''',
+                        height=50
+                    )
+
+    elif tipo_relatorio == "Relatório de Renovação de Contratos":
+        st.subheader("🔄 Relatório de Renovação e Atualização de Valores")
+        st.markdown("Selecione um contrato para visualizar a projeção dos dados atualizados com base no reajuste e confirme a operação para gerar a renovação.")
+
+        dados_renovacao = buscar_dados_contratos(API_URL)
+        if not dados_renovacao:
+            st.info("Nenhum contrato disponível para renovação.")
+        else:
+            df_ren = preparar_dataframe(dados_renovacao)
+            
+            # Criar dicionário de seleção amigável
+            opcoes_ren = {
+                f"Contrato #{row.get('Nº Sequência', i)} | Locatário: {row.get('Locatário')} | Imóvel: {row.get('Descrição do Imóvel')}": row
+                for i, row in df_ren.iterrows()
+            }
+
+            contrato_escolhido_str = st.selectbox("Selecione o Contrato para Analisar a Renovação:", list(opcoes_ren.keys()))
+
+            if contrato_escolhido_str:
+                c_data = opcoes_ren[contrato_escolhido_str]
+                
+                st.markdown("---")
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    st.markdown(f"**Locador:** {c_data.get('Locador')}")
+                    st.markdown(f"**Locatário:** {c_data.get('Locatário')}")
+                    st.markdown(f"**Imóvel:** {c_data.get('Descrição do Imóvel')}")
+                    st.markdown(f"**Data Final Atual:** {c_data.get('Data Final')}")
+                with col_info2:
+                    valor_atual = float(c_data.get('Valor (R$)', 0.0))
+                    indice_sugerido = c_data.get('Índice de Reajuste', 'IPCA')
+                    st.markdown(f"**Valor Atual do Locativo:** R$ {valor_atual:,.2f}")
+                    st.markdown(f"**Índice de Reajuste Previsto:** {indice_sugerido}")
+
+                st.markdown("### 🧮 Configuração do Reajuste e Novo Período")
+                r_col1, r_col2 = st.columns(2)
+                with r_col1:
+                    percentual_reajuste = st.number_input("Percentual de Reajuste Aplicável (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.1)
+                with r_col2:
+                    novo_prazo_meses = st.number_input("Novo Prazo (Meses)", min_value=1, value=12)
+
+                # Cálculo do valor devidamente atualizado
+                valor_atualizado = valor_atual * (1 + (percentual_reajuste / 100.0))
+                
+                # Datas de Vigência do Novo Contrato
+                try:
+                    data_fim_atual_obj = date.fromisoformat(str(c_data.get('Data Final')))
+                    nova_data_inicio = data_fim_atual_obj + timedelta(days=1)
+                except:
+                    nova_data_inicio = date.today()
+
+                nova_data_fim = nova_data_inicio + timedelta(days=int(novo_prazo_meses)*30)
+
+                st.info(f"💡 **Projeção Calculada:** O valor do aluguel passará de **R$ {valor_atual:,.2f}** para **R$ {valor_atualizado:,.2f}**. "
+                        f"O novo contrato vigorará de **{nova_data_inicio.strftime('%d/%m/%Y')}** até **{nova_data_fim.strftime('%d/%m/%Y')}**.")
+
+                st.markdown("---")
+                
+                # Botão de confirmação antes de gerar o novo contrato
+                confirma_renovacao = st.checkbox("✅ **Confirmo os dados acima e autorizo a geração e ativação do novo contrato renovado.**")
+
+                if st.button("🚀 Gerar Novo Contrato Renovado", type="primary"):
+                    if not confirma_renovacao:
+                        st.error("❌ **Confirmação Obrigatória:** Marque a caixa de confirmação dos dados acima para prosseguir com a renovação do contrato.")
+                    else:
+                        payload_renovacao = {
+                            "id_imovel": c_data.get('ID Imóvel'),
+                            "id_locador": c_data.get('ID Locador'),
+                            "id_locatario": c_data.get('ID Locatário'),
+                            "id_fiador": c_data.get('ID Fiador') if pd.notna(c_data.get('ID Fiador')) else None,
+                            "data_inicio": nova_data_inicio.isoformat(),
+                            "prazo_meses": int(novo_prazo_meses),
+                            "data_final": nova_data_fim.isoformat(),
+                            "valor_locacao": round(valor_atualizado, 2),
+                            "multa": c_data.get('Multa (R$)', 0.0)
+                        }
+                        
+                        try:
+                            res_ren = requests.post(f"{API_URL}/contratos", json=payload_renovacao)
+                            if res_ren.status_code in [200, 201]:
+                                st.success("🎉 Contrato renovado e ativado com sucesso no sistema!")
+                            else:
+                                st.error(f"Erro ao salvar o contrato renovado: {res_ren.text}")
+                        except Exception as e:
+                            st.error(f"Erro de comunicação com o servidor backend: {e}")
+
+# ------------------------------------------------------------------------------
+# ABA 5: ALERTAS
+# ------------------------------------------------------------------------------
+with tab5:
+    st.header("Verificação e Envio de Alertas")
+    email_admin = st.text_input("E-mail do Administrador", value="admin@imoveis.com")
+    
+    if st.button("🔔 Executar Verificação (Alertas de 60 dias)"):
+        try:
+            res = requests.post(f"{API_URL}/alertas/verificar-vencimentos?email_admin={email_admin}")
+            if res.status_code == 200:
+                st.success(res.json().get('mensagem'))
+        except Exception as e:
+            st.error(f"Erro ao solicitar alertas: {e}")
+
+# ------------------------------------------------------------------------------
+# ABA 6: MENSAGENS E COMUNICAÇÃO
+# ------------------------------------------------------------------------------
+with tab6:
+    st.header("💬 Gerador de Mensagens Automáticas")
+    st.markdown("Selecione um contrato ativo e escolha o objetivo da mensagem nos botões abaixo para gerar o texto personalizado.")
+
+    try:
+        res_msg = requests.get(f"{API_URL}/relatorio")
+        if res_msg.status_code == 200 and res_msg.json():
+            dados_msg = res_msg.json()
+            
+            opcoes_contratos = {
+                f"{c['locatario']} - {c['descricao_imovel']}": c 
+                for c in dados_msg
+            }
+            
+            contrato_selecionado = st.selectbox("Selecione o Destinatário (Locatário - Imóvel):", list(opcoes_contratos.keys()))
+            
+            if contrato_selecionado:
+                dados_c = opcoes_contratos[contrato_selecionado]
+                locatario_nome = dados_c.get('locatario', 'Locatário')
+                imovel_desc = dados_c.get('descricao_imovel', 'Imóvel')
+                valor_aluguel = float(dados_c.get('valor_locacao', 0.0))
+                
+                st.markdown("---")
+                st.markdown("### Escolha o Tipo de Mensagem:")
+                
+                b_col1, b_col2, b_col3, b_col4, b_col5 = st.columns(5)
+                
+                tipo_mensagem = None
+                with b_col1:
+                    if st.button("🤝 Comunicação Amiga", use_container_width=True):
+                        tipo_mensagem = "Comunicação Amiga"
+                with b_col2:
+                    if st.button("🎉 Boas Festas", use_container_width=True):
+                        tipo_mensagem = "Boas Festas"
+                with b_col3:
+                    if st.button("🏆 Congratulações", use_container_width=True):
+                        tipo_mensagem = "Congratulações"
+                with b_col4:
+                    if st.button("💰 Cobrança Aluguel", use_container_width=True):
+                        tipo_mensagem = "Cobrança de Aluguel"
+                with b_col5:
+                    if st.button("📄 Cobrança IPTU", use_container_width=True):
+                        tipo_mensagem = "Cobrança de IPTU"
+
+                if "tipo_msg_ativo" not in st.session_state:
+                    st.session_state.tipo_msg_ativo = "Comunicação Amiga"
+
+                if tipo_mensagem:
+                    st.session_state.tipo_msg_ativo = tipo_mensagem
+
+                ativo = st.session_state.tipo_msg_ativo
+                st.markdown(f"**Categoria Ativa:** `{ativo}`")
+
+                mensagem_gerada = ""
+                if ativo == "Comunicação Amiga":
+                    mensagem_gerada = f"Olá, {locatario_nome}! Tudo bem? Passando aqui apenas para saber se está tudo certo com o imóvel em {imovel_desc} e se precisa de alguma assistência da nossa parte. Um abraço!"
+                elif ativo == "Boas Festas":
+                    mensagem_gerada = f"Olá, {locatario_nome}! Gostaríamos de desejar a você e sua família um excelente final de ano e de boas festas! Que o próximo ano traga muitas alegrias no seu lar em {imovel_desc}."
+                elif ativo == "Congratulações":
+                    mensagem_gerada = f"Parabéns, {locatario_nome}! Desejamos muitas felicidades, saúde e sucesso. É um prazer ter você como nosso locatário no imóvel {imovel_desc}. Aproveite muito o seu dia!"
+                elif ativo == "Cobrança de Aluguel":
+                    mensagem_gerada = f"Olá, {locatario_nome}. Esperamos que esteja bem. Verificamos em nosso sistema que o pagamento do aluguel referente ao imóvel {imovel_desc}, no valor de R$ {valor_aluguel:,.2f}, encontra-se em aberto. Caso já tenha efetuado o pagamento, por favor, desconsidere esta mensagem."
+                elif ativo == "Cobrança de IPTU":
+                    mensagem_gerada = f"Olá, {locatario_nome}. Tudo bem? Passando para lembrar sobre a parcela do IPTU referente ao imóvel {imovel_desc}. Caso precise do código de barras ou do boleto atualizado para pagamento, é só nos avisar!"
+
+                st.markdown("### Texto da Mensagem")
+                texto_final = st.text_area("Você pode editar o texto abaixo antes de copiar:", value=mensagem_gerada, height=150)
+                
+                st.info("💡 Dica: Copie o texto acima e cole diretamente no WhatsApp ou E-mail do locatário para enviar.")
+            
+        else:
+            st.info("Não há contratos consolidados disponíveis para gerar mensagens no momento.")
+    except Exception as e:
+        st.error(f"Erro ao conectar com a API para buscar os contratos: {e}")
